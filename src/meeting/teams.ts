@@ -38,6 +38,7 @@ interface TeamsChatWindow extends Window {
 
 // Create a singleton detector instance for Microsoft Teams
 const teamsStateDetector = createStateDetector(TEAMS_STATE_CONFIG)
+const JOIN_RETRY_COOLDOWN_MS = 2000
 
 /**
  * Fetch the meeting URL out-of-band to learn its HTTP status. Used to classify
@@ -794,6 +795,8 @@ export class TeamsProvider implements MeetingProviderInterface {
     // Wait to be in the meeting
     console.log("Waiting to confirm meeting join...")
     let inMeeting = false
+    let lastJoinClickAt = Date.now()
+    let joinRetryCount = 0
 
     while (!inMeeting) {
       // Check if we have been refused (or sign-in is required). isBotNotAccepted
@@ -810,6 +813,19 @@ export class TeamsProvider implements MeetingProviderInterface {
           GLOBAL.setError(MeetingEndReason.ApiRequest)
         }
         throw new Error("API request to stop Teams recording")
+      }
+
+      // A successful Playwright click only proves that the input event was
+      // dispatched; Teams may leave the enabled pre-join CTA in place without
+      // acting on it. Retry while the button is still present, matching the
+      // defensive behavior used by the Google Meet provider.
+      if (Date.now() - lastJoinClickAt >= JOIN_RETRY_COOLDOWN_MS) {
+        const retried = await clickWithInnerText(page, "button", "Join now", 1, true)
+        lastJoinClickAt = Date.now()
+        if (retried) {
+          joinRetryCount += 1
+          console.log(`Join now remained present; retried click (attempt #${joinRetryCount})`)
+        }
       }
 
       // Check if we are in the meeting (multiple indicators)
@@ -1025,12 +1041,23 @@ async function clickWithInnerText(
         const humanizeActive = Boolean((page as unknown as { _original?: unknown })._original)
         const humanized = humanizeActive && (await clickButtonHumanized(page, htmlType, innerText))
         if (!humanized) {
-          await page.evaluate(
+          continueButton = await page.evaluate(
             ({ innerText, htmlType }) => {
-              const el = Array.from(document.querySelectorAll(htmlType)).find(
-                (e) => e.textContent?.trim() === innerText
-              )
+              const el = Array.from(document.querySelectorAll(htmlType)).find((e) => {
+                if (!(e instanceof HTMLElement) || e.textContent?.trim() !== innerText) {
+                  return false
+                }
+                const style = window.getComputedStyle(e)
+                const disabled = e instanceof HTMLButtonElement && e.disabled
+                return (
+                  !disabled &&
+                  e.getClientRects().length > 0 &&
+                  style.display !== "none" &&
+                  style.visibility !== "hidden"
+                )
+              })
               ;(el as HTMLElement | undefined)?.click()
+              return Boolean(el)
             },
             { innerText, htmlType }
           )
@@ -1076,10 +1103,18 @@ async function clickButtonHumanized(
   const selectors = [`${htmlType}:text-is("${innerText}")`, `${htmlType}:has-text("${innerText}")`]
   for (const selector of selectors) {
     try {
-      const locator = page.locator(selector).first()
-      if ((await locator.count()) === 0) continue
-      await locator.click({ timeout: 2000 })
-      return true
+      const matches = page.locator(selector)
+      const count = await matches.count()
+      for (let index = 0; index < count; index += 1) {
+        const locator = matches.nth(index)
+        const [visible, enabled] = await Promise.all([
+          locator.isVisible().catch(() => false),
+          locator.isEnabled().catch(() => false)
+        ])
+        if (!visible || !enabled) continue
+        await locator.click({ timeout: 2000 })
+        return true
+      }
     } catch {
       // Try the next strategy, then the caller's DOM-click fallback.
     }
