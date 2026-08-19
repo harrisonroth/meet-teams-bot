@@ -1049,26 +1049,7 @@ async function clickWithInnerText(
         const humanizeActive = Boolean((page as unknown as { _original?: unknown })._original)
         const humanized = humanizeActive && (await clickButtonHumanized(page, htmlType, innerText))
         if (!humanized) {
-          continueButton = await page.evaluate(
-            ({ innerText, htmlType }) => {
-              const el = Array.from(document.querySelectorAll(htmlType)).find((e) => {
-                if (!(e instanceof HTMLElement) || e.textContent?.trim() !== innerText) {
-                  return false
-                }
-                const style = window.getComputedStyle(e)
-                const disabled = e instanceof HTMLButtonElement && e.disabled
-                return (
-                  !disabled &&
-                  e.getClientRects().length > 0 &&
-                  style.display !== "none" &&
-                  style.visibility !== "hidden"
-                )
-              })
-              ;(el as HTMLElement | undefined)?.click()
-              return Boolean(el)
-            },
-            { innerText, htmlType }
-          )
+          continueButton = await clickButtonDom(page, htmlType, innerText)
         }
       }
     } catch (e) {
@@ -1109,22 +1090,58 @@ async function clickButtonHumanized(
   // :text-is mirrors the exact-text detection above; :has-text is a fallback for
   // buttons that wrap the label in a child element.
   const selectors = [`${htmlType}:text-is("${innerText}")`, `${htmlType}:has-text("${innerText}")`]
-  for (const selector of selectors) {
-    try {
-      const matches = page.locator(selector)
-      const count = await matches.count()
-      for (let index = 0; index < count; index += 1) {
-        const locator = matches.nth(index)
-        const [visible, enabled] = await Promise.all([
-          locator.isVisible().catch(() => false),
-          locator.isEnabled().catch(() => false)
-        ])
-        if (!visible || !enabled) continue
-        await locator.click({ timeout: 2000 })
-        return true
+  for (const frame of page.frames()) {
+    for (const selector of selectors) {
+      try {
+        const matches = frame.locator(selector)
+        const count = await matches.count()
+        for (let index = 0; index < count; index += 1) {
+          const locator = matches.nth(index)
+          const [visible, enabled] = await Promise.all([
+            locator.isVisible().catch(() => false),
+            locator.isEnabled().catch(() => false)
+          ])
+          if (!visible || !enabled) continue
+          await locator.click({ timeout: 2000 })
+          return true
+        }
+      } catch {
+        // Try the next selector/frame, then the caller's DOM-click fallback.
       }
+    }
+  }
+  return false
+}
+
+async function clickButtonDom(page: Page, htmlType: string, innerText: string): Promise<boolean> {
+  for (const frame of page.frames()) {
+    try {
+      const clicked = await frame.evaluate(
+        ({ innerText, htmlType }) => {
+          const el = Array.from(document.querySelectorAll(htmlType)).find((candidate) => {
+            if (
+              !(candidate instanceof HTMLElement) ||
+              candidate.textContent?.trim() !== innerText
+            ) {
+              return false
+            }
+            const style = window.getComputedStyle(candidate)
+            const disabled = candidate instanceof HTMLButtonElement && candidate.disabled
+            return (
+              !disabled &&
+              candidate.getClientRects().length > 0 &&
+              style.display !== "none" &&
+              style.visibility !== "hidden"
+            )
+          })
+          ;(el as HTMLElement | undefined)?.click()
+          return Boolean(el)
+        },
+        { innerText, htmlType }
+      )
+      if (clicked) return true
     } catch {
-      // Try the next strategy, then the caller's DOM-click fallback.
+      // Cross-origin or detached frames are expected; continue to the next frame.
     }
   }
   return false
