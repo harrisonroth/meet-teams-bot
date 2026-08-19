@@ -1179,24 +1179,40 @@ async function typeBotName(page: Page, botName: string, maxAttempts: number): Pr
   for (let i = 0; i < maxAttempts; i++) {
     try {
       await page.waitForSelector(INPUT_BOT, { timeout: 1000 })
-      const input = page.locator(INPUT_BOT)
+      const input = page.locator(INPUT_BOT).first()
 
       if ((await input.count()) > 0) {
-        await input.focus()
-        await input.fill(botName)
-
-        // Verify the input value
-        const currentValue = await input.inputValue()
-        if (currentValue === botName) {
-          return
-        }
-
-        // If fill didn't work, try typing
-        await input.clear()
-        await page.keyboard.type(botName, { delay: 100 })
+        // Teams' guest-name form is stateful: fill() can update the DOM value
+        // without driving the keyboard/blur validation that enables Join now.
+        // Enter the name as a user would, then wait for Teams to confirm it by
+        // enabling the CTA before allowing the join flow to continue.
+        await input.click()
+        await input.fill("")
+        await input.pressSequentially(botName, { delay: 75 })
+        await input.press("Tab")
 
         if ((await input.inputValue()) === botName) {
-          return
+          const enabled = await page
+            .waitForFunction(
+              () => {
+                const button = Array.from(document.querySelectorAll("button")).find(
+                  (candidate) => candidate.textContent?.trim() === "Join now"
+                ) as HTMLButtonElement | undefined
+                return (
+                  Boolean(button) &&
+                  !button?.disabled &&
+                  button?.getAttribute("aria-disabled") !== "true"
+                )
+              },
+              undefined,
+              { timeout: 5000 }
+            )
+            .then(() => true)
+            .catch(() => false)
+          if (enabled) return
+          console.warn(
+            `[Teams JoinClick] Guest name was entered but Join now remained disabled (attempt ${i + 1}/${maxAttempts})`
+          )
         }
       }
 
