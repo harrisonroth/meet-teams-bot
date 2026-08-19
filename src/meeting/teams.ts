@@ -1114,37 +1114,65 @@ async function clickButtonHumanized(
 }
 
 async function clickButtonDom(page: Page, htmlType: string, innerText: string): Promise<boolean> {
-  for (const frame of page.frames()) {
-    try {
-      const clicked = await frame.evaluate(
-        ({ innerText, htmlType }) => {
-          const el = Array.from(document.querySelectorAll(htmlType)).find((candidate) => {
-            if (
-              !(candidate instanceof HTMLElement) ||
-              candidate.textContent?.trim() !== innerText
-            ) {
-              return false
+  try {
+    const result = await page.evaluate(
+      ({ innerText, htmlType }) => {
+        const contexts: Array<{ label: string; document: Document }> = [
+          { label: "main", document }
+        ]
+        document.querySelectorAll("iframe").forEach((iframe, index) => {
+          try {
+            if (iframe.contentDocument) {
+              contexts.push({ label: `iframe-${index}`, document: iframe.contentDocument })
             }
-            const style = window.getComputedStyle(candidate)
-            const disabled = candidate instanceof HTMLButtonElement && candidate.disabled
-            return (
-              !disabled &&
+          } catch {
+            // Cross-origin frames cannot be reached from the main document.
+          }
+        })
+
+        const diagnostics: Array<{
+          context: string
+          visible: boolean
+          disabled: boolean
+          ariaDisabled: boolean
+        }> = []
+        for (const context of contexts) {
+          const candidates = Array.from(context.document.querySelectorAll(htmlType)).filter(
+            (candidate) => candidate.textContent?.trim() === innerText
+          )
+          for (const candidate of candidates) {
+            const htmlCandidate = candidate as HTMLElement
+            const view = candidate.ownerDocument.defaultView
+            const style = view?.getComputedStyle(candidate)
+            const visible =
               candidate.getClientRects().length > 0 &&
-              style.display !== "none" &&
-              style.visibility !== "hidden"
-            )
-          })
-          ;(el as HTMLElement | undefined)?.click()
-          return Boolean(el)
-        },
-        { innerText, htmlType }
+              style?.display !== "none" &&
+              style?.visibility !== "hidden"
+            const disabled =
+              candidate.tagName === "BUTTON" && (candidate as HTMLButtonElement).disabled
+            const ariaDisabled = candidate.getAttribute("aria-disabled") === "true"
+            diagnostics.push({ context: context.label, visible, disabled, ariaDisabled })
+            if (!visible || disabled || ariaDisabled || typeof htmlCandidate.click !== "function") {
+              continue
+            }
+            htmlCandidate.click()
+            return { clicked: true, diagnostics }
+          }
+        }
+        return { clicked: false, diagnostics }
+      },
+      { innerText, htmlType }
+    )
+    if (!result.clicked && result.diagnostics.length > 0) {
+      console.warn(
+        `[Teams JoinClick] DOM fallback found no actionable ${innerText} candidate: ${JSON.stringify(result.diagnostics)}`
       )
-      if (clicked) return true
-    } catch {
-      // Cross-origin or detached frames are expected; continue to the next frame.
     }
+    return result.clicked
+  } catch (error) {
+    console.warn(`[Teams JoinClick] DOM fallback failed: ${formatError(error)}`)
+    return false
   }
-  return false
 }
 
 async function typeBotName(page: Page, botName: string, maxAttempts: number): Promise<void> {
