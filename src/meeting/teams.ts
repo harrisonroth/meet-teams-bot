@@ -1022,7 +1022,15 @@ async function clickWithInnerText(
             elements = Array.from(document.querySelectorAll(htmlType))
           }
 
-          return elements.some((elem) => elem.textContent?.trim() === innerText)
+          return elements.some((elem) => {
+            if (elem.textContent?.trim() !== innerText) return false
+            const style = elem.ownerDocument.defaultView?.getComputedStyle(elem)
+            return (
+              elem.getClientRects().length > 0 &&
+              style?.display !== "none" &&
+              style?.visibility !== "hidden"
+            )
+          })
         },
         { innerText, htmlType, i }
       )
